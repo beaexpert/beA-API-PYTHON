@@ -2,7 +2,7 @@
     beA.expert BEA-API / EXPERIMENTAL
     ---------------------------------
     Demo script not intented for production
-    Version 1.1 / 21.09.2021
+    Version 1.2 / 31.12.2021
     (c) be next GmbH (Licence: GPL-2.0 & BSD-3-Clause)
     https://opensource.org/licenses/GPL-2.0
     https://opensource.org/licenses/BSD-3-Clause
@@ -63,7 +63,7 @@ def send_request(__req, __func):
     }
     
     r = requests.post(url, data=data, headers=headers)
-    r.encoding = r.apparent_encoding
+    r.encoding = 'utf-8'
 
     if __DEBUG__:
         print(__func + ":\n" + r.text)
