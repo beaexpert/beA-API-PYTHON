@@ -13,7 +13,7 @@
     - cryptography
 
     notice: to use this script you first need to
-            subscribe to the beA.expert API
+            subscribe to the beA.expert API 
             more info: https://bea.expert/api/
 """
 
@@ -1081,8 +1081,8 @@ def bea_send_message(__token, __postboxSafeId, __msg_infos, __msg_att, __session
         print("validations:")
         print(validations)
 
-    token, info = bea_send_message_validation(validationTokenMSG, validations, __sessionKey)
-    return token, info       
+    token, info, messageId = bea_send_message_validation(validationTokenMSG, validations, __sessionKey)
+    return token, info, messageId       
 
 
 def bea_send_message_validation(__validationTokenMSG, __validations, __sessionKey):
