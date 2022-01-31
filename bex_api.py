@@ -2,7 +2,7 @@
     beA.expert BEA-API / EXPERIMENTAL
     ---------------------------------
     Demo script not intented for production
-    Version 1.2 / 31.12.2021
+    Version 1.3 / 31.01.2022
     (c) be next GmbH (Licence: GPL-2.0 & BSD-3-Clause)
     https://opensource.org/licenses/GPL-2.0
     https://opensource.org/licenses/BSD-3-Clause
@@ -49,8 +49,12 @@ if os.path.exists(__config_file):
     __config = configparser.ConfigParser()
     __config.read(__config_file)
 else :
-    __config["BEA_EXPERT_API"]["HOST"] = "...."
-    __config["BEA_EXPERT_API"]["BEX_IDENT"] = "...."    
+    __config = {
+        "BEA_EXPERT_API": {
+            "HOST": "...",
+            "BEX_IDENT": "..."
+        }
+    }  
     
 
 def send_request(__req, __func):    
@@ -1120,7 +1124,7 @@ def bea_send_message_validation(__validationTokenMSG, __validations, __sessionKe
     if __DEBUG__:
         print("token: " + token)
 
-    return token, info      
+    return token, info, messageId
 
 
 def bea_search(__token, 
