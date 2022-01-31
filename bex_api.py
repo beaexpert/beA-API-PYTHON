@@ -8,7 +8,6 @@
     https://opensource.org/licenses/BSD-3-Clause
 
     Dependencies: 
-    -------------
     - pyOpenSSL 
     - pycryptodomex
     - cryptography
@@ -1115,6 +1114,7 @@ def bea_send_message_validation(__validationTokenMSG, __validations, __sessionKe
     try:
         token = res['token']
         info = res['info']
+        messageId = res['messageId']
     except KeyError as e: 
         if __DEBUG__:
             print("KeyError in 'bea_send_message_validation'")
