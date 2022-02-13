@@ -2,7 +2,7 @@
     beA.expert BEA-API / EXPERIMENTAL
     ---------------------------------
     Demo script not intented for production
-    Version 1.3 / 31.01.2022
+    Version 1.5 / 13.02.2022
     (c) be next GmbH (Licence: GPL-2.0 & BSD-3-Clause)
     https://opensource.org/licenses/GPL-2.0
     https://opensource.org/licenses/BSD-3-Clause
@@ -746,6 +746,90 @@ def bea_delete_message(__token, __messageId):
     return token, info       
 
 
+
+def decrypt_message_subject(__iv, __tag, __value, __key):
+    iv = base64.b64decode(__iv)
+    tag = base64.b64decode(__tag)
+    value = base64.b64decode(__value)
+    aesCipher = AES.new(__key, AES.MODE_GCM, nonce=iv)
+    decSubject = str(aesCipher.decrypt_and_verify(value, tag), 'utf-8')
+    return decSubject
+
+
+def decrypt_message_object(encryptedObject, __key):
+    # decrypt objectKey with sessionKey
+    iv = base64.b64decode(encryptedObject.encKeyInfo.encKey.iv)
+    tag = base64.b64decode(encryptedObject.encKeyInfo.encKey.tag)
+    value = base64.b64decode(encryptedObject.encKeyInfo.encKey.value)
+    aesCipher = AES.new(__key, AES.MODE_GCM, nonce=iv)
+    objectKey = aesCipher.decrypt_and_verify(value, tag)
+
+    # decrypt encryptedObject with objectKey
+    iv = base64.b64decode(encryptedObject.enc_iv)
+    tag = base64.b64decode(encryptedObject.enc_tag)
+    value = base64.b64decode(encryptedObject.enc_data)
+    aesCipher = AES.new(objectKey, AES.MODE_GCM, nonce=iv)
+    return str(aesCipher.decrypt_and_verify(value, tag), 'utf-8')
+  
+            
+def decrypt_message_attachment(encAttachment, att_key):
+    # decrypt attachment with att_key
+    if(encAttachment.symEncAlgorithm == "http://www.w3.org/2001/04/xmlenc#aes256-cbc") or ((encAttachment.iv == '') and (encAttachment.tag == '')): #CBC
+        if(encAttachment.iv == ''):
+            data_tmp = base64.b64decode(encAttachment.data)
+            iv = data_tmp[:16]
+            value = data_tmp[16:]
+        else:
+            iv = base64.b64decode(encAttachment.iv)
+            value = base64.b64decode(encAttachment.data)
+
+        if(att_key == ''):
+            aesCipher = AES.new(encAttachment.key, AES.MODE_CBC, iv)
+        else:
+            aesCipher = AES.new(att_key, AES.MODE_CBC, iv)
+
+        decAttachment = aesCipher.decrypt_and_verify(value)
+
+    else: #GCM
+        iv = base64.b64decode(encAttachment.iv)
+        tag = base64.b64decode(encAttachment.tag)
+        value = base64.b64decode(encAttachment.data)
+        aesCipher = AES.new(att_key, AES.MODE_GCM, nonce=iv)
+        decAttachment = aesCipher.decrypt_and_verify(value, tag)
+
+    return decAttachment
+
+
+
+def get_message_attachment_keys(decryptedObject):
+    attachmensKey = []
+    root = ET.fromstring(decryptedObject)
+    remove_namespace(root, u'http://www.w3.org/2000/09/xmldsig#')
+    remove_namespace(root, u'http://www.osci.de/2002/04/osci')
+    remove_namespace(root, u'http://schemas.xmlsoap.org/soap/envelope/')
+    remove_namespace(root, u'http://www.w3.org/2001/04/xmlenc#')
+    remove_namespace(root, u'http://www.w3.org/2001/XMLSchema-instance')
+
+    enc_data = root.findall("EncryptedData")
+    att_names = [e.find("CipherData/CipherReference").attrib['URI'] for e in enc_data]
+    att_keys = [e.find("KeyInfo/MgmtData").text for e in enc_data]
+
+    if __DEBUG__:
+        print('att_names:')
+        print(att_names)
+        print('att_keys:')
+        print(att_keys)
+
+    counter = 0
+    for n in att_names:
+        tmp_att_k = SimpleNamespace()
+        tmp_att_k.name = n.replace("cid:", "")
+        tmp_att_k.key = att_keys[counter]
+        attachmensKey.append(tmp_att_k)  
+        counter = counter + 1  
+
+    return attachmensKey  
+
 def bea_get_message(__token, __messageId, __sessionKey):
     req_json = { 
         "token": __token,
@@ -792,11 +876,7 @@ def bea_get_message(__token, __messageId, __sessionKey):
     if(__sessionKey != ''):  
         # 1. decrypt subject 
         if(encSubject.iv != '') and (encSubject.tag != '') and (encSubject.value != ''):
-            iv = base64.b64decode(encSubject.iv)
-            tag = base64.b64decode(encSubject.tag)
-            value = base64.b64decode(encSubject.value)
-            aesCipher = AES.new(__sessionKey, AES.MODE_GCM, nonce=iv)
-            decSubject = str(aesCipher.decrypt_and_verify(value, tag), 'utf-8')
+            decSubject = decrypt_message_subject(encSubject.iv, encSubject.tag, encSubject.value, __sessionKey)
         else:
             decSubject = ''    
 
@@ -813,19 +893,7 @@ def bea_get_message(__token, __messageId, __sessionKey):
             if __DEBUG__:
                 print(o)
             
-            # decrypt objectKey with sessionKey
-            iv = base64.b64decode(o.encKeyInfo.encKey.iv)
-            tag = base64.b64decode(o.encKeyInfo.encKey.tag)
-            value = base64.b64decode(o.encKeyInfo.encKey.value)
-            aesCipher = AES.new(__sessionKey, AES.MODE_GCM, nonce=iv)
-            objectKey = aesCipher.decrypt_and_verify(value, tag)
-
-            # decrypt encryptedObject with objectKey
-            iv = base64.b64decode(o.enc_iv)
-            tag = base64.b64decode(o.enc_tag)
-            value = base64.b64decode(o.enc_data)
-            aesCipher = AES.new(objectKey, AES.MODE_GCM, nonce=iv)
-            decObject = str(aesCipher.decrypt_and_verify(value, tag), 'utf-8')
+            decObject = decrypt_message_object(o, __sessionKey)
 
             if __DEBUG__:
                 print(decObject)
@@ -834,33 +902,11 @@ def bea_get_message(__token, __messageId, __sessionKey):
             tmp_obj.name = o.enc_name
             tmp_obj.data = decObject
             decryptedObjects.append(tmp_obj)
+            
 
             if(o.enc_name == "project_coco"):
-                root = ET.fromstring(decObject)
-                remove_namespace(root, u'http://www.w3.org/2000/09/xmldsig#')
-                remove_namespace(root, u'http://www.osci.de/2002/04/osci')
-                remove_namespace(root, u'http://schemas.xmlsoap.org/soap/envelope/')
-                remove_namespace(root, u'http://www.w3.org/2001/04/xmlenc#')
-                remove_namespace(root, u'http://www.w3.org/2001/XMLSchema-instance')
-
-                enc_data = root.findall("EncryptedData")
-                att_names = [e.find("CipherData/CipherReference").attrib['URI'] for e in enc_data]
-                att_keys = [e.find("KeyInfo/MgmtData").text for e in enc_data]
-
-                if __DEBUG__:
-                    print('att_names:')
-                    print(att_names)
-                    print('att_keys:')
-                    print(att_keys)
-
-                counter = 0
-                for n in att_names:
-                    tmp_att_k = SimpleNamespace()
-                    tmp_att_k.name = n.replace("cid:", "")
-                    tmp_att_k.key = att_keys[counter]
-                    attachmensKey.append(tmp_att_k)  
-                    counter = counter + 1                 
-
+                attachmensKey = get_message_attachment_keys(decObject)
+                
                 if __DEBUG__:
                     print('attachmensKey:')
                     print(attachmensKey)
@@ -881,42 +927,21 @@ def bea_get_message(__token, __messageId, __sessionKey):
                     if(k.name == a.reference):
                         att_key = base64.b64decode(k.key)
                         break
-            
-                # decrypt attachment with att_key
-                if(a.symEncAlgorithm == "http://www.w3.org/2001/04/xmlenc#aes256-cbc") or ((a.iv == '') and (a.tag == '')): #CBC
-                    if(a.iv == ''):
-                        data_tmp = base64.b64decode(a.data)
-                        iv = data_tmp[:16]
-                        value = data_tmp[16:]
-                    else:
-                        iv = base64.b64decode(a.iv)
-                        value = base64.b64decode(a.data)
 
-                    if(att_key == ''):
-                        aesCipher = AES.new(a.key, AES.MODE_CBC, iv)
-                    else:
-                        aesCipher = AES.new(att_key, AES.MODE_CBC, iv)
-
-                    decAttachment = aesCipher.decrypt_and_verify(value)
-
-                else: #GCM
-                    iv = base64.b64decode(a.iv)
-                    tag = base64.b64decode(a.tag)
-                    value = base64.b64decode(a.data)
-                    aesCipher = AES.new(att_key, AES.MODE_GCM, nonce=iv)
-                    decAttachment = aesCipher.decrypt_and_verify(value, tag)
-
+                decAttachment = decrypt_message_attachment(a, att_key)
+                
                 tmp_att = SimpleNamespace()
                 tmp_att.reference = a.reference
                 tmp_att.data = decAttachment
                 tmp_att.type = a.type
                 tmp_att.sizeKB = a.sizeKB
                 tmp_att.hashValue = a.hashValue
-                decryptedAttachments.append(tmp_att)    
+                decryptedAttachments.append(tmp_att)
 
         message_struct.attachments = decryptedAttachments                    
 
-    return token, message_struct  
+    return token, message_struct 
+
 
 
 def bea_init_message(__token, __postboxSafeId, __msg_infos, __sessionKey):
@@ -959,8 +984,14 @@ def bea_init_message(__token, __postboxSafeId, __msg_infos, __sessionKey):
     return messageToken, key  
 
 
-def bea_encrypt_message(__token, __postboxSafeId, __msg_infos, __msg_att, __sessionKey):
-    messageToken, key = bea_init_message(__token, __postboxSafeId, __msg_infos, __sessionKey)
+def bea_encrypt_message(__token, __postboxSafeId, __msg_infos, __msg_att, __sessionKey, __messageDraft = None):
+    messageToken, key = "", ""
+
+    if __messageDraft is None:
+        messageToken, key = bea_init_message(__token, __postboxSafeId, __msg_infos, __sessionKey)
+    else:
+        key = __messageDraft["key"]
+        messageToken = __messageDraft["messageToken"]
 
     msg_infos_struct = json.loads(
         str(json.JSONEncoder().encode(__msg_infos)), 
@@ -990,12 +1021,12 @@ def bea_encrypt_message(__token, __postboxSafeId, __msg_infos, __msg_att, __sess
 
     enc_attachment_data = []
     for a in msg_att_struc.attachments:
-        bin_data = base64.b64decode(a.data.encode('ascii'))
         aesCipher = AES.new(key, AES.MODE_GCM)
-        ciphertext, tag = aesCipher.encrypt_and_digest(bin_data)
+        data_raw = base64.b64decode(a.data.encode('ascii'))
+        ciphertext, tag = aesCipher.encrypt_and_digest(data_raw)
 
         h = SHA256.new()
-        h.update(bin_data)
+        h.update(data_raw)
 
         encAtt_struct = SimpleNamespace()
         encAtt_struct.data = base64.b64encode(ciphertext).decode('utf-8')
@@ -1003,7 +1034,7 @@ def bea_encrypt_message(__token, __postboxSafeId, __msg_infos, __msg_att, __sess
         encAtt_struct.iv = base64.b64encode(aesCipher.nonce).decode('utf-8')
         encAtt_struct.key = base64.b64encode(key).decode('utf-8')
         encAtt_struct.name = a.name
-        encAtt_struct.sizeKB = int(len(a.data) / 1024)
+        encAtt_struct.sizeKB = int(len(data_raw) / 1024)
         encAtt_struct.hash = base64.b64encode(h.digest()).decode('utf-8')
         encAtt_struct.att_type = a.att_type
         encAtt = json.loads(json.dumps(encAtt_struct, default=lambda o: o.__dict__, sort_keys=True, indent=4))
@@ -1026,17 +1057,20 @@ def bea_encrypt_message(__token, __postboxSafeId, __msg_infos, __msg_att, __sess
     return req_json   
 
 
-def bea_save_message(__token, __postboxSafeId, __msg_infos, __msg_att, __sessionKey):
-    req_json = bea_encrypt_message(__token, __postboxSafeId, __msg_infos, __msg_att, __sessionKey)
+def bea_save_message(__token, __postboxSafeId, __msg_infos, __msg_att, __sessionKey, __messageDraft = None):
+    req_json = bea_encrypt_message(__token, __postboxSafeId, __msg_infos, __msg_att, __sessionKey, __messageDraft)
     req = str(json.JSONEncoder().encode(req_json))
     res = send_request(req, 'bea_save_message')
+    info = ''
+    messageId = ''
 
     if __DEBUG__:
         print(res)
 
     try:
         token = res['token']
-        info = res['info']
+        messageId = res['messageId']
+        if hasattr(res, "info") : info = res['info']
     except KeyError as e: 
         if __DEBUG__:
             print("KeyError in 'bea_save_message'")
@@ -1046,11 +1080,11 @@ def bea_save_message(__token, __postboxSafeId, __msg_infos, __msg_att, __session
     if __DEBUG__:
         print("token: " + token)
 
-    return token, info 
+    return token, info, messageId
 
 
-def bea_send_message(__token, __postboxSafeId, __msg_infos, __msg_att, __sessionKey):
-    req_json = bea_encrypt_message(__token, __postboxSafeId, __msg_infos, __msg_att, __sessionKey)
+def bea_send_message(__token, __postboxSafeId, __msg_infos, __msg_att, __sessionKey, __messageDraft = None):
+    req_json = bea_encrypt_message(__token, __postboxSafeId, __msg_infos, __msg_att, __sessionKey, __messageDraft)
     req = str(json.JSONEncoder().encode(req_json))
     res = send_request(req, 'bea_send_message')
 
@@ -1082,7 +1116,7 @@ def bea_send_message(__token, __postboxSafeId, __msg_infos, __msg_att, __session
         print(validations)
 
     token, info, messageId = bea_send_message_validation(validationTokenMSG, validations, __sessionKey)
-    return token, info, messageId       
+    return token, info, messageId     
 
 
 def bea_send_message_validation(__validationTokenMSG, __validations, __sessionKey):
@@ -1183,4 +1217,145 @@ def bea_search(__token,
 
 
 
+def bea_init_message_draft(__token, __messageId, __sessionKey):
+    req_json = { 
+        "token": __token,
+        "messageId": __messageId
+    }
+    req = str(json.JSONEncoder().encode(req_json))
+    res = send_request(req, 'bea_init_message_draft')
+    
+    if __DEBUG__:
+        print(res)
+
+    try:
+        messageToken = res['messageToken']
+        message_struct = json.loads(
+            str(json.JSONEncoder().encode(res)), 
+            object_hook=lambda 
+            d: SimpleNamespace(**d)
+        )
+
+        encSubject = message_struct.msg_infos.betreff
+        message_encObjects = json.loads(
+            str(json.JSONEncoder().encode(res["msg_infos"]['encryptedObjects'])), 
+            object_hook=lambda 
+            d: SimpleNamespace(**d)
+        )
+
+        message_encAttachments = json.loads(
+            str(json.JSONEncoder().encode(res["msg_infos"]['attachments'])), 
+            object_hook=lambda 
+            d: SimpleNamespace(**d)
+        )
+    except KeyError as e: 
+        if __DEBUG__:
+            print("KeyError in 'bea_get_message'")
+            print(e)
+        exit()
+
+    if __DEBUG__:
+        print("messageToken: " + messageToken)
+        print("encSubject: " + str(encSubject))
+        print("message_encObjects: " + str(message_encObjects))
+        print("message_encAttachments: " + str(message_encAttachments))
+
+    if(__sessionKey != ''): 
+        # 1. decrypt subject  
+        iv = base64.b64decode(message_struct.key.iv)
+        tag = base64.b64decode(message_struct.key.tag)
+        value = base64.b64decode(message_struct.key.value)
+        aesCipher = AES.new(__sessionKey, AES.MODE_GCM, nonce=iv)
+        key = aesCipher.decrypt_and_verify(value, tag)    
+
+        # 2. decrypt subject 
+        if(encSubject.iv != '') and (encSubject.tag != '') and (encSubject.value != ''):
+            decSubject = decrypt_message_subject(encSubject.iv, encSubject.tag, encSubject.value, __sessionKey)
+        else:
+            decSubject = ''    
+
+        if __DEBUG__:
+            print(decSubject)
+
+        message_struct.msg_infos.betreff = decSubject
+
+        # 3. decrypt encryptedObjects
+        decryptedObjects = []
+        attachmensKey = []
+        for o in message_encObjects:
+            if __DEBUG__:
+                print(o)
+            
+            decObject = decrypt_message_object(o, __sessionKey)
+
+            if __DEBUG__:
+                print(decObject)
+
+            tmp_obj = SimpleNamespace()
+            tmp_obj.name = o.enc_name
+            tmp_obj.data = decObject
+            decryptedObjects.append(tmp_obj)
+            
+
+            if(o.enc_name == "project_coco"):
+                attachmensKey = get_message_attachment_keys(decObject)
+                
+                if __DEBUG__:
+                    print('attachmensKey:')
+                    print(attachmensKey)
+
+        message_struct.msg_infos.decryptedObjects = decryptedObjects
+        del message_struct.msg_infos.encryptedObjects
+
+
+        # 4. decrypt attachments
+        decryptedAttachments = []
+        if message_encAttachments is not None:
+            for a in message_encAttachments:
+                if __DEBUG__:
+                    print(a)
+
+                att_key = ''
+                for k in attachmensKey:
+                    if(k.name == a.reference):
+                        att_key = base64.b64decode(k.key)
+                        break
+
+                decAttachment = decrypt_message_attachment(a, att_key)
+                
+                tmp_att = SimpleNamespace()
+                tmp_att.reference = a.reference
+                tmp_att.data = decAttachment
+                tmp_att.type = a.type
+                tmp_att.sizeKB = a.sizeKB
+                tmp_att.hashValue = a.hashValue
+                decryptedAttachments.append(tmp_att)
+
+        
+        msg_attachments_data = {
+            "attachments": []
+        }
+        msg_attachments_info = []
+        for a in decryptedAttachments:
+            msg_attachments_data["attachments"].append({
+                "name": a.reference,
+                "data": base64.b64encode(a.data).decode('utf-8'),
+                "att_type": a.type
+            })
+            msg_attachments_info.append(a.reference)
+
+        #message_struct.attachments = decryptedAttachments       
+        message_struct.msg_infos.attachments = msg_attachments_info    
+
+    # convert simpleNamespce struct to json
+    msg_infos = json.loads(json.dumps(message_struct.msg_infos, default=lambda o: o.__dict__, sort_keys=True, indent=4))  
+    msg_att = json.loads(json.dumps(msg_attachments_data, default=lambda o: o.__dict__, sort_keys=True, indent=4))                
+
+
+    message_draft = {
+        "messageToken": messageToken,
+        "key": key
+    }
+
+    return message_draft, msg_infos, msg_att 
 
