@@ -1054,6 +1054,9 @@ def bea_encrypt_message(__token, __postboxSafeId, __msg_infos, __msg_att, __sess
         }
     }
 
+    if __messageDraft is not None:
+        req_json["msg_infos"] = __msg_infos
+
     return req_json   
 
 
@@ -1261,7 +1264,7 @@ def bea_init_message_draft(__token, __messageId, __sessionKey):
         print("message_encAttachments: " + str(message_encAttachments))
 
     if(__sessionKey != ''): 
-        # 1. decrypt subject  
+        # 1. decrypt key  
         iv = base64.b64decode(message_struct.key.iv)
         tag = base64.b64decode(message_struct.key.tag)
         value = base64.b64decode(message_struct.key.value)
@@ -1346,6 +1349,25 @@ def bea_init_message_draft(__token, __messageId, __sessionKey):
 
         #message_struct.attachments = decryptedAttachments       
         message_struct.msg_infos.attachments = msg_attachments_info    
+
+    new_receivers = []
+    for r in message_struct.msg_infos.receivers:
+        new_receivers.append(r.safeId)
+
+    message_struct.msg_infos.receivers = new_receivers
+
+    # TODO: read XJustiz
+    message_struct.msg_infos.is_eeb_response = False
+    message_struct.msg_infos.is_eeb = False
+    message_struct.msg_infos.dringend = False
+    message_struct.msg_infos.pruefen = False
+    message_struct.msg_infos.eeb_fremdid = ""
+    message_struct.msg_infos.eeb_date = ""
+    message_struct.msg_infos.verfahrensgegenstand = ""
+    message_struct.msg_infos.eeb_erforderlich = False
+    message_struct.msg_infos.eeb_accept = False
+    message_struct.msg_infos.xj = True
+
 
     # convert simpleNamespce struct to json
     msg_infos = json.loads(json.dumps(message_struct.msg_infos, default=lambda o: o.__dict__, sort_keys=True, indent=4))  
