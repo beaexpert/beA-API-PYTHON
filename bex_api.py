@@ -2,13 +2,12 @@
     beA.expert BEA-API / EXPERIMENTAL
     ---------------------------------
     Demo script not intented for production
-    Version 1.5 / 13.02.2022
+    Version 2.2 / 12.08.2024
     (c) be next GmbH (Licence: GPL-2.0 & BSD-3-Clause)
     https://opensource.org/licenses/GPL-2.0
     https://opensource.org/licenses/BSD-3-Clause
 
     Dependencies: 
-    - pyOpenSSL 
     - pycryptodomex
     - cryptography
 
@@ -24,9 +23,7 @@ import os.path
 import configparser
 from types import SimpleNamespace
 import xml.etree.ElementTree as ET
-
-# pip install pyOpenSSL
-from OpenSSL import crypto 
+import platform, shutil, subprocess, time, os
 
 # pip install pycryptodomex
 from Cryptodome.Cipher import AES
@@ -37,24 +34,35 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives.serialization.pkcs12 import load_key_and_certificates
 
+import tempfile
 
-__DEBUG__ = False
 
 __current_path = os.getcwd()
+__current_path = os.path.dirname(os.path.realpath(__file__))
+
 __config=[]
+__config_file=os.path.join(__current_path,'private.config.ini')
+
 __config_file=__current_path+'/private.config.ini'
 if os.path.exists(__config_file):
     __config = configparser.ConfigParser()
     __config.read(__config_file)
+    __DEBUG__ = __config["DEBUG"]["PRINT"]
 else :
     __config = {
         "BEA_EXPERT_API": {
-            "HOST": "...",
+            "HOST": "http://127.0.0.1:8422/",
             "BEX_IDENT": "..."
         }
-    }  
-    
+    }
+    #__config["BEA_EXPERT_API"]["HOST"] = "...."
+    #__config["BEA_EXPERT_API"]["BEX_IDENT"] = "...."    
+    __DEBUG__ = True
+
+
+#__config["BEA_EXPERT_API"]["HOST"] = "http://95.216.157.76:8422/"
 
 def send_request(__req, __func):    
     url = __config["BEA_EXPERT_API"]["HOST"] + __func
@@ -66,6 +74,7 @@ def send_request(__req, __func):
     }
     
     r = requests.post(url, data=data, headers=headers)
+    #r.encoding = r.apparent_encoding
     r.encoding = 'utf-8'
 
     if __DEBUG__:
@@ -96,10 +105,9 @@ def bea_login(__sw_token, __sw_pin, __token_b64 = ''):
     else:
         token_raw = base64.b64decode(__token_b64)
 
-    p12 = crypto.load_pkcs12(token_raw, __sw_pin)
-    cert = p12.get_certificate()   
-    pkey = p12.get_privatekey()
-    thumbprint = cert.digest("sha1").decode("utf-8").replace(":","").lower()
+    (pkey,cert,add_cert) = serialization.pkcs12.load_key_and_certificates(token_raw, password=__sw_pin.encode("ascii"), backend=default_backend())
+    thumbprint = bytearray(cert.fingerprint(hashes.SHA1())).hex()
+    cert_b64 = base64.b64encode(cert.public_bytes(serialization.Encoding.PEM)).decode("ascii")
 
     if __DEBUG__:
         print('certificate object: ' + str(cert))
@@ -128,37 +136,34 @@ def bea_login(__sw_token, __sw_pin, __token_b64 = ''):
         print("tokenPAOS: " + tokenPAOS)
 
 
-    challengeVal_signed = base64.b64encode(crypto.sign(
-        pkey, 
-        base64.b64decode(challengeVal), 
-        "sha256"
+    challengeVal_signed = base64.b64encode(pkey.sign(
+        base64.b64decode(challengeVal),
+        padding.PKCS1v15(),
+        hashes.SHA256()
     )).decode('ascii')
 
-    challengeValidation_signed = base64.b64encode(crypto.sign(
-        pkey, 
-        base64.b64decode(challengeValidation), 
-        "sha256"
-    )).decode('ascii')  
+    challengeValidation_signed = base64.b64encode(pkey.sign(
+        base64.b64decode(challengeValidation),
+        padding.PKCS1v15(),
+        hashes.SHA256()
+    )).decode('ascii')
 
     if __DEBUG__:
         print("challengeVal_signed: " + challengeVal_signed)
         print("challengeValidation_signed: " + challengeValidation_signed)
 
-    return bea_login_step2(tokenPAOS, p12, challengeVal_signed, challengeValidation_signed)
+    return bea_login_step2(tokenPAOS, pkey, cert_b64, challengeVal_signed, challengeValidation_signed)
 
 
 
-def bea_login_step2(__tokenPAOS, __p12, __challengeVal_signed, __challengeValidation_signed):
-    cert = crypto.dump_certificate(crypto.FILETYPE_PEM, __p12.get_certificate())
-    cert_b64 = base64.b64encode(cert).decode('ascii') 
+def bea_login_step2(__tokenPAOS, __pkey, __cert_b64, __challengeVal_signed, __challengeValidation_signed): 
 
     if __DEBUG__:
-        print("cert: \n" + cert.decode('ascii'))
-        print("cert_b64: \n" + cert_b64)
+        print("cert_b64: \n" + __cert_b64)
 
     req_json = {
         "tokenPAOS": __tokenPAOS,
-        "userCert": cert_b64,
+        "userCert": __cert_b64,
         "challengeSigned": __challengeVal_signed,
         "validationSigned": __challengeValidation_signed
     }
@@ -186,30 +191,30 @@ def bea_login_step2(__tokenPAOS, __p12, __challengeVal_signed, __challengeValida
         print("tokenValidation: " + tokenValidation)
 
 
-    pkey_pem = crypto.dump_privatekey(crypto.FILETYPE_PEM, __p12.get_privatekey())
-    private_key = serialization.load_pem_private_key(
-        pkey_pem,
-        password=None,
-        backend=default_backend() 
-    )
-
-    sessionKey_dec = private_key.decrypt(
-        base64.b64decode(sessionKey),
-        padding.OAEP(
-            mgf=padding.MGF1(algorithm=hashes.SHA256()),
-            algorithm=hashes.SHA256(),
-            label=None
+    try:
+        sessionKey_dec = __pkey.decrypt(
+            base64.b64decode(sessionKey),
+            padding.OAEP(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None
+            )
         )
-    )
+    except:
+        sessionKey_dec = b"12345678901234567890123456789000"
 
-    validationKey_dec = private_key.decrypt(
-        base64.b64decode(validationKey),
-        padding.OAEP(
-            mgf=padding.MGF1(algorithm=hashes.SHA256()),
-            algorithm=hashes.SHA256(),
-            label=None
+
+    try:
+        validationKey_dec = __pkey.decrypt(
+            base64.b64decode(validationKey),
+            padding.OAEP(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None
+            )
         )
-    )  
+    except:
+        validationKey_dec = b"12345678901234567890123456789000"
 
     if __DEBUG__:#
         print("sessionKey_dec: ")
@@ -245,8 +250,6 @@ def bea_login_step3(__tokenValidation, __validationKey):
         print("token: " + token)
 
     return token
-
-
 
 
 def bea_logout(__token):
@@ -380,8 +383,7 @@ def bea_get_folderoverview(__token, __folderId, __sessionKey):
                 del messages_struct[counter].encSubject #remove the key, its no more needed
                 counter = counter + 1
 
-    return token, messages_struct   
-
+    return token, messages_struct  
 
 
 def bea_get_folderstructure(__token, __postboxSafeId):
@@ -747,6 +749,8 @@ def bea_delete_message(__token, __messageId):
 
 
 
+
+
 def decrypt_message_subject(__iv, __tag, __value, __key):
     iv = base64.b64decode(__iv)
     tag = base64.b64decode(__tag)
@@ -828,7 +832,9 @@ def get_message_attachment_keys(decryptedObject):
         attachmensKey.append(tmp_att_k)  
         counter = counter + 1  
 
-    return attachmensKey  
+    return attachmensKey               
+
+
 
 def bea_get_message(__token, __messageId, __sessionKey):
     req_json = { 
@@ -840,6 +846,11 @@ def bea_get_message(__token, __messageId, __sessionKey):
     
     if __DEBUG__:
         print(res)
+
+        #f = open("log_message.txt", "w")
+        #_b64 = base64.b64encode(__sessionKey)
+        #f.write("sessionKey: " + str(_b64) + "\n" + json.JSONEncoder().encode(res))
+        #f.close()
 
     try:
         token = res['token']
@@ -864,6 +875,11 @@ def bea_get_message(__token, __messageId, __sessionKey):
     except KeyError as e: 
         if __DEBUG__:
             print("KeyError in 'bea_get_message'")
+            print(e)
+        exit()
+    except AttributeError as e: 
+        if __DEBUG__:
+            print("AttributeError in 'bea_get_message'")
             print(e)
         exit()
 
@@ -941,6 +957,7 @@ def bea_get_message(__token, __messageId, __sessionKey):
         message_struct.attachments = decryptedAttachments                    
 
     return token, message_struct 
+
 
 
 
@@ -1086,10 +1103,14 @@ def bea_save_message(__token, __postboxSafeId, __msg_infos, __msg_att, __session
     return token, info, messageId
 
 
-def bea_send_message(__token, __postboxSafeId, __msg_infos, __msg_att, __sessionKey, __messageDraft = None):
+def bea_send_message(__token, __postboxSafeId, __msg_infos, __msg_att, __sessionKey, __messageDraft = None, no_v2 = False):
     req_json = bea_encrypt_message(__token, __postboxSafeId, __msg_infos, __msg_att, __sessionKey, __messageDraft)
     req = str(json.JSONEncoder().encode(req_json))
-    res = send_request(req, 'bea_send_message')
+    
+    if no_v2 is True:
+        res = send_request(req, 'bea_send_message_nov2')
+    else:
+        res = send_request(req, 'bea_send_message')
 
     if __DEBUG__:
         print(res)
@@ -1118,11 +1139,11 @@ def bea_send_message(__token, __postboxSafeId, __msg_infos, __msg_att, __session
         print("validations:")
         print(validations)
 
-    token, info, messageId = bea_send_message_validation(validationTokenMSG, validations, __sessionKey)
+    token, info, messageId = bea_send_message_validation(validationTokenMSG, validations, __sessionKey, no_v2 = no_v2)
     return token, info, messageId     
 
 
-def bea_send_message_validation(__validationTokenMSG, __validations, __sessionKey):
+def bea_send_message_validation(__validationTokenMSG, __validations, __sessionKey, no_v2 = False):
     dec_validations = []
 
     for v in __validations:
@@ -1143,7 +1164,10 @@ def bea_send_message_validation(__validationTokenMSG, __validations, __sessionKe
         "validations": dec_validations
     }
     req = str(json.JSONEncoder().encode(req_json))
-    res = send_request(req, 'bea_send_message_validation')
+    #res = send_request(req, 'bea_send_message_validation')
+    if no_v2 is True: res = send_request(req, 'bea_send_message_validation_nov2')
+    else: res = send_request(req, 'bea_send_message_validation')
+
 
     if __DEBUG__:
         print(res)
@@ -1161,7 +1185,66 @@ def bea_send_message_validation(__validationTokenMSG, __validations, __sessionKe
     if __DEBUG__:
         print("token: " + token)
 
-    return token, info, messageId
+    return token, info, messageId   
+
+
+
+def bea_get_accessrights(__token):
+    req_json = { 
+        "token": __token
+    }
+    req = str(json.JSONEncoder().encode(req_json))
+    res = send_request(req, 'bea_get_accessrights')
+
+    if __DEBUG__:
+        print(res)
+
+    try:
+        token = res['token']
+        accessrights_struct = json.loads(
+            str(json.JSONEncoder().encode(res)), 
+            object_hook=lambda 
+            d: SimpleNamespace(**d)
+        )
+    except KeyError as e: 
+        if __DEBUG__:
+            print("KeyError in 'bea_get_accessrights'")
+            print(e)
+        exit()
+
+    if __DEBUG__:
+        print("token: " + token)
+
+    return token, accessrights_struct   
+
+
+def bea_get_configuration(__token):
+    req_json = { 
+        "token": __token
+    }
+    req = str(json.JSONEncoder().encode(req_json))
+    res = send_request(req, 'bea_get_configuration')
+
+    if __DEBUG__:
+        print(res)
+
+    try:
+        token = res['token']
+        configuration_struct = json.loads(
+            str(json.JSONEncoder().encode(res)), 
+            object_hook=lambda 
+            d: SimpleNamespace(**d)
+        )
+    except KeyError as e: 
+        if __DEBUG__:
+            print("KeyError in 'bea_get_configuration'")
+            print(e)
+        exit()
+
+    if __DEBUG__:
+        print("token: " + token)
+
+    return token, configuration_struct    
 
 
 def bea_search(__token, 
@@ -1350,6 +1433,7 @@ def bea_init_message_draft(__token, __messageId, __sessionKey):
         #message_struct.attachments = decryptedAttachments       
         message_struct.msg_infos.attachments = msg_attachments_info    
 
+
     new_receivers = []
     for r in message_struct.msg_infos.receivers:
         new_receivers.append(r.safeId)
@@ -1381,3 +1465,311 @@ def bea_init_message_draft(__token, __messageId, __sessionKey):
 
     return message_draft, msg_infos, msg_att 
 
+
+def bex_login(sw_token, __sw_pin, token_b64=''):
+    if token_b64 == '':
+        token_raw = open(sw_token, 'rb').read()
+    else:
+        token_raw = base64.b64decode(token_b64)
+
+    (pkey,cert,add_cert) = serialization.pkcs12.load_key_and_certificates(token_raw, password=__sw_pin.encode("ascii"), backend=default_backend())
+    thumbprint = bytearray(cert.fingerprint(hashes.SHA1())).hex()
+    cert_b64 = base64.b64encode(cert.public_bytes(serialization.Encoding.PEM)).decode("ascii")
+
+    fn_params = {
+        "config": {
+            "disable_login_v1": False,                  # <- default: false
+            "disable_login_v2": False,                  # <- default: true
+            "fallback_ksw_v8_extra_session": False,     # <- default: false
+            "p12_certificate_file": base64.b64encode(token_raw).decode("ascii"),          # <- default: "" (if not "" with pass -> api decrypt/sign etc)
+            "p12_certificate_pass": __sw_pin,                # <- default: "" (if not "" with file -> api decrypt/sign etc)
+            "allow_endless_sessions": False,            # <- default: false (needs p12 + pass!)
+        },
+        "thumbprint": thumbprint
+    }
+    fn_name = "bex_login_step1"
+    fn_args = str(json.JSONEncoder().encode(fn_params))
+
+    
+    #result = bea_module.bea_api_request(fn_name, fn_args)
+    result = send_request(fn_args, fn_name)
+    print(result)
+
+    return result["token"], result["safeId"], result["sessionKey"]
+
+
+
+
+# Example usage:
+# convert_p12_to_pem('path/to/your_certificate.p12', 'path/to/your_certificate.pem', 'p12password')
+def convert_p12_to_pem(p12_path, pem_out_path, p12_password):
+    # Read the .p12 file
+    with open(p12_path, 'rb') as p12_file:
+        p12_data = p12_file.read()
+    
+    # Load the private key and certificate from the .p12 file
+    private_key, certificate, additional_certificates = load_key_and_certificates(
+        p12_data, 
+        p12_password.encode(), 
+        default_backend()
+    )
+    
+    # Write the private key and certificate(s) to a .pem file
+    with open(pem_out_path, 'wb') as pem_file:
+        
+        # Write the private key
+        pem_file.write(
+            private_key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.TraditionalOpenSSL,
+                encryption_algorithm=serialization.NoEncryption()
+            )
+        )
+        
+        # Write the main certificate
+        pem_file.write(
+            certificate.public_bytes(serialization.Encoding.PEM)
+        )
+
+        # Write any additional certificates
+        if additional_certificates:
+            for cert in additional_certificates:
+                pem_file.write(cert.public_bytes(serialization.Encoding.PEM))
+
+           
+                
+    print(f'Conversion complete. The PEM file is saved as {pem_out_path}')
+
+
+
+
+def sign_cms_command_line_edition(p12_struct: dict, to_sign_challenge: str, path_to_openssl: str = "") -> str:
+    # extract p12_struct
+    sw_token = p12_struct["sw_token"] if "sw_token" in p12_struct else ""
+    sw_pin = p12_struct["sw_pin"] if "sw_pin" in p12_struct else ""
+    token_b64 = p12_struct["token_b64"] if "token_b64" in p12_struct else ""
+
+    is_windows = False
+
+    # define temp dir
+    if platform.system() == "Windows":
+        tempdir = os.environ['TEMP']
+        is_windows = True
+    elif platform.system()=="Darwin":
+        tempdir = os.environ['TMPDIR']
+    else:
+        tempdir = tempfile.gettempdir()
+
+    tempdir = os.path.join(tempdir, "bex_python_cms_signer_temp/")
+    if os.path.exists(tempdir): shutil.rmtree(tempdir)
+    os.makedirs(tempdir)
+
+
+    # save p12 token to temp
+    if token_b64 != '': # save the buffer
+        user_p12_file = os.path.join(tempdir, "x.p12")
+        token_raw = base64.b64decode(token_b64)
+        with open(user_p12_file, 'wb') as file:
+            file.write(token_raw)
+    else:
+        user_p12_file = sw_token
+
+    tmp_pem_file = os.path.join(tempdir, "x.pem")
+    convert_p12_to_pem(user_p12_file, tmp_pem_file, sw_pin)
+
+
+    # define signature input file
+    challenge_txt_file = os.path.join(tempdir, "challenge.txt")
+    with open(challenge_txt_file, "w") as file:
+        file.write(to_sign_challenge)
+
+
+    # define signature out file
+    signature_p7m_file = os.path.join(tempdir, "response.p7m")
+
+
+    # define openssl exe with path
+    openssl_exe = "openssl.exe" if is_windows else "openssl"
+    if path_to_openssl != "": openssl_exe = os.path.join(path_to_openssl, openssl_exe)
+
+    # execute signature cmd line
+    cmd = [
+        openssl_exe, 
+        "cms", "-sign", 
+        "-in", challenge_txt_file, 
+        "-out", signature_p7m_file, 
+        "-signer", tmp_pem_file, 
+        "-keyopt", "rsa_padding_mode:pss", 
+        "-keyopt", "rsa_pss_saltlen:32", 
+        "-outform", "pem", 
+        "-md", "SHA256", 
+        '-passin', "pass:"+sw_pin #"pass:000000"#
+    ]
+    process = subprocess.Popen(cmd,
+                               stdin=subprocess.PIPE,
+                               stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE,
+                               close_fds=True)
+
+    time.sleep(.5)
+
+    # read response signed
+    signature_ugly = ""
+    with open(signature_p7m_file, 'r') as file:
+        signature_ugly = file.read()
+
+    signature_clean = signature_ugly.replace("-----BEGIN CMS-----", "")\
+                                   .replace("-----END CMS-----", "")\
+                                   .replace("\r", "")\
+                                   .replace("\n", "")
+
+
+    # cleanup temp dir
+    shutil.rmtree(tempdir)
+
+
+    # return signed value
+    return signature_clean
+
+
+
+
+def bex_login_step1(sw_token, sw_pin, token_b64):
+    if token_b64 == '':
+        token_raw = open(sw_token, 'rb').read()
+    else:
+        token_raw = base64.b64decode(token_b64)
+
+    (pkey,cert,add_cert) = serialization.pkcs12.load_key_and_certificates(token_raw, password=sw_pin.encode("ascii"), backend=default_backend())
+    thumbprint = bytearray(cert.fingerprint(hashes.SHA1())).hex()
+    cert_b64 = base64.b64encode(cert.public_bytes(serialization.Encoding.PEM)).decode("ascii")
+
+    if __DEBUG__:
+        print('certificate object: ' + str(cert))
+        print('certificate private key: ' + str(pkey))
+        print('certificate thumbprint: ' + str(thumbprint))
+
+    fn_params = {
+        "thumbprint": thumbprint
+    }
+    req = str(json.JSONEncoder().encode(fn_params))
+    res = send_request(req, 'bex_login_step1')
+    
+    if __DEBUG__: print("bex_login_step1", res)
+    try:
+        tokenPAOS = res['tokenPAOS']
+        challengeVal = res['challengeVal']
+        challengeValidation = res['challengeValidation']
+
+    except KeyError as e: 
+        if __DEBUG__:
+            print("KeyError in 'bex_login_step1'")
+            print(e)
+        exit()
+
+    if __DEBUG__: print("tokenPAOS: " + tokenPAOS)
+                
+
+    p12_struct = {
+        "sw_token": sw_token,
+        "sw_pin": sw_pin,
+        "token_b64": token_b64,
+    }
+
+    challengeVal_signed = sign_cms_command_line_edition(p12_struct, challengeVal)
+    challengeValidation_signed = sign_cms_command_line_edition(p12_struct, challengeValidation)
+
+    return bex_login_step2(tokenPAOS, challengeVal_signed, challengeValidation_signed, pkey, cert_b64)
+
+
+
+
+
+
+def bex_login_step2(__tokenPAOS, __challengeVal_signed, __challengeValidation_signed, __pkey, cert_b64):
+    if __DEBUG__:
+        print("cert_b64: \n" + cert_b64)
+
+    req_json = {
+        "tokenPAOS": __tokenPAOS,
+        "userCert": cert_b64,
+        "challengeSigned": __challengeVal_signed,
+        "validationSigned": __challengeValidation_signed
+    }
+    req = str(json.JSONEncoder().encode(req_json))
+    res_login_step2 = send_request(req, 'bex_login_step2')
+    
+    if __DEBUG__:
+        print(res_login_step2)
+
+    try:
+        safeId = res_login_step2['safeId']
+        sessionKey = res_login_step2['sessionKey']
+        validationKey = res_login_step2['validationKey']
+        tokenValidation = res_login_step2['tokenValidation']
+    except KeyError as e: 
+        if __DEBUG__:
+            print("KeyError in 'bex_login_step2'")
+            print(e)
+        exit()
+
+
+    try:
+        sessionKey_dec = __pkey.decrypt(
+            base64.b64decode(sessionKey),
+            padding.OAEP(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None
+            )
+        )
+    except:
+        sessionKey_dec = b"12345678901234567890123456789000"
+
+
+    try:
+        validationKey_dec = __pkey.decrypt(
+            base64.b64decode(validationKey),
+            padding.OAEP(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None
+            )
+        )
+    except:
+        validationKey_dec = b"12345678901234567890123456789000"
+
+    if __DEBUG__:#
+        print("sessionKey_dec: ")
+        print(sessionKey_dec)
+        print("validationKey_dec: ")
+        print(validationKey_dec)
+
+    token = bex_login_step3(tokenValidation, validationKey_dec)
+    return token, safeId, sessionKey_dec
+
+
+
+def bex_login_step3(__tokenValidation, __validationKey):
+    req_json = {
+        "tokenValidation": __tokenValidation,
+        "validationKey": base64.b64encode(__validationKey).decode('ascii')
+    }
+    req = str(json.JSONEncoder().encode(req_json))
+    res_login_step3 = send_request(req, 'bex_login_step3')
+    
+    if __DEBUG__:
+        print(res_login_step3)
+
+    try:
+        token = res_login_step3['token']
+    except KeyError as e: 
+        if __DEBUG__:
+            print("KeyError in 'bex_login_step3'")
+            print(e)
+        exit()
+
+    if __DEBUG__:
+        print("token: " + token)
+
+    return token
