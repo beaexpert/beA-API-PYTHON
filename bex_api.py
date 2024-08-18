@@ -45,7 +45,6 @@ __current_path = os.path.dirname(os.path.realpath(__file__))
 __config=[]
 __config_file=os.path.join(__current_path,'private.config.ini')
 
-__config_file=__current_path+'/private.config.ini'
 if os.path.exists(__config_file):
     __config = configparser.ConfigParser()
     __config.read(__config_file)
@@ -61,8 +60,6 @@ else :
     #__config["BEA_EXPERT_API"]["BEX_IDENT"] = "...."    
     __DEBUG__ = True
 
-
-#__config["BEA_EXPERT_API"]["HOST"] = "http://95.216.157.76:8422/"
 
 def send_request(__req, __func):    
     url = __config["BEA_EXPERT_API"]["HOST"] + __func
